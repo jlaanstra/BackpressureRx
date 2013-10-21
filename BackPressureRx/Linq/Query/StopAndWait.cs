@@ -14,36 +14,59 @@ namespace BackPressureRx.Linq.Query
     {
         private readonly IControlledObservable<T> source;
         protected readonly ISubject<int> controller;
-        protected IDisposable subscription;
+        protected IDisposable controllerSubscription;
+        private readonly object gate;
+        private int count;
 
         public StopAndWait(IControlledObservable<T> observable)
         {
             this.source = observable;
             this.controller = new Subject<int>();
+            this.count = 0;
+            this.gate = new object();
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
-            IDisposable subscription = this.source.Subscribe(new StopAndWaitObserver<T>(observer, this));
-            IDisposable controllerSubscription = this.source.ControlledBy(this.controller);
+            SerialDisposable subscription = new SerialDisposable();
+            subscription.Disposable = this.source.Subscribe(new StopAndWaitObserver<T>(observer, this, subscription));
 
-            this.subscription = new CompositeDisposable(subscription, controllerSubscription);
+            lock (gate)
+            {
+                if (count++ == 0)
+                {
+                    controllerSubscription = this.source.ControlledBy(this.controller);
+                }
+            }
 
             //start requesting the first value
             DefaultScheduler.Instance.Schedule(() => this.controller.OnNext(1));
 
-            return this.subscription;
+            return Disposable.Create(() =>
+            {
+                subscription.Dispose();
+
+                lock(gate)
+                {
+                    if(--count == 0)
+                    {
+                        controllerSubscription.Dispose();
+                    }
+                }
+            });
         }
 
         class StopAndWaitObserver<T> : IObserver<T>, IDisposable
         {
-            private IObserver<T> observer;
             private readonly StopAndWait<T> observable;
+            private IObserver<T> observer;
+            private IDisposable cancel;
 
-            public StopAndWaitObserver(IObserver<T> observer, StopAndWait<T> observable)
+            public StopAndWaitObserver(IObserver<T> observer, StopAndWait<T> observable, IDisposable cancel)
             {
                 this.observer = observer;
                 this.observable = observable;
+                this.cancel = cancel;
             }
 
             public void OnCompleted()
@@ -69,7 +92,7 @@ namespace BackPressureRx.Linq.Query
             {
                 observer = NopObserver<T>.Instance;
 
-                var cancel = Interlocked.Exchange(ref observable.subscription, null);
+                var cancel = Interlocked.Exchange(ref this.cancel, null);
                 if (cancel != null)
                 {
                     cancel.Dispose();

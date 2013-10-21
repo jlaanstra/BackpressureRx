@@ -13,8 +13,10 @@ namespace BackPressureRx.Linq.Query
     class Windowed<T> : IObservable<T>
     {
         private readonly IControlledObservable<T> source;
-        protected readonly ISubject<int> controller;
-        protected IDisposable subscription;
+        private readonly ISubject<int> controller;
+        private IDisposable controllerSubscription;
+        private int count;
+        private readonly object gate;
 
         private int window;
 
@@ -23,30 +25,51 @@ namespace BackPressureRx.Linq.Query
             this.source = observable;
             this.window = window;
             this.controller = new Subject<int>();
+            this.count = 0;
+            this.gate = new object();
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
-            IDisposable subscription = this.source.Subscribe(new WindowedObserver<T>(observer, this));
-            IDisposable controllerSubscription = this.source.ControlledBy(this.controller);
+            SerialDisposable subscription = new SerialDisposable();
+            subscription.Disposable = this.source.Subscribe(new WindowedObserver<T>(observer, this, subscription));
 
-            this.subscription = new CompositeDisposable(subscription, controllerSubscription);
+            lock (gate)
+            {
+                if (count++ == 0)
+                {
+                    controllerSubscription = this.source.ControlledBy(this.controller);
+                }
+            }
 
             //start requesting the first value
             DefaultScheduler.Instance.Schedule(() => this.controller.OnNext(this.window));
 
-            return this.subscription;
+            return Disposable.Create(() =>
+            {
+                subscription.Dispose();
+
+                lock (gate)
+                {
+                    if (--count == 0)
+                    {
+                        controllerSubscription.Dispose();
+                    }
+                }
+            });
         }
 
         class WindowedObserver<T> : IObserver<T>, IDisposable
         {
+            private readonly Windowed<T> observable; 
             private IObserver<T> observer;
-            private readonly Windowed<T> observable;
+            private IDisposable cancel;
 
-            public WindowedObserver(IObserver<T> observer, Windowed<T> observable)
+            public WindowedObserver(IObserver<T> observer, Windowed<T> observable, IDisposable cancel)
             {
                 this.observer = observer;
                 this.observable = observable;
+                this.cancel = cancel;
             }
 
             public void OnCompleted()
@@ -72,7 +95,7 @@ namespace BackPressureRx.Linq.Query
             {
                 observer = NopObserver<T>.Instance;
 
-                var cancel = Interlocked.Exchange(ref observable.subscription, null);
+                var cancel = Interlocked.Exchange(ref this.cancel, null);
                 if (cancel != null)
                 {
                     cancel.Dispose();
