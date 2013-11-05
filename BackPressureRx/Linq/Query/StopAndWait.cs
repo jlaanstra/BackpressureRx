@@ -13,47 +13,23 @@ namespace BackPressureRx.Linq.Query
     class StopAndWait<T> : IObservable<T>
     {
         private readonly IControlledObservable<T> source;
-        protected readonly ISubject<int> controller;
-        protected IDisposable controllerSubscription;
+        protected IDisposable subscription;
         private readonly object gate;
-        private int count;
 
         public StopAndWait(IControlledObservable<T> observable)
         {
             this.source = observable;
-            this.controller = new Subject<int>();
-            this.count = 0;
             this.gate = new object();
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
-            SerialDisposable subscription = new SerialDisposable();
-            subscription.Disposable = this.source.Subscribe(new StopAndWaitObserver<T>(observer, this, subscription));
-
-            lock (gate)
-            {
-                if (count++ == 0)
-                {
-                    controllerSubscription = this.source.ControlledBy(this.controller);
-                }
-            }
+            this.subscription = this.source.Subscribe(new StopAndWaitObserver<T>(observer, this, subscription));
 
             //start requesting the first value
-            DefaultScheduler.Instance.Schedule(() => this.controller.OnNext(1));
+            DefaultScheduler.Instance.Schedule(() => this.source.Request(1));
 
-            return Disposable.Create(() =>
-            {
-                subscription.Dispose();
-
-                lock(gate)
-                {
-                    if(--count == 0)
-                    {
-                        controllerSubscription.Dispose();
-                    }
-                }
-            });
+            return this.subscription;
         }
 
         class StopAndWaitObserver<T> : IObserver<T>, IDisposable
@@ -85,7 +61,7 @@ namespace BackPressureRx.Linq.Query
             {
                 this.observer.OnNext(value);
                 //request new value after processing of the current one completed
-                DefaultScheduler.Instance.Schedule(() => this.observable.controller.OnNext(1));
+                DefaultScheduler.Instance.Schedule(() => this.observable.source.Request(1));
             }
 
             public void Dispose()

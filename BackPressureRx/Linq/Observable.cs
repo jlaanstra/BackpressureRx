@@ -21,6 +21,11 @@ namespace BackPressureRx.Linq
             return new StopAndWait<T>(This);
         }
 
+        public static IObservable<T> Windowed<T>(this IControlledObservable<T> This, int window)
+        {
+            return new Windowed<T>(This, window);
+        }
+
         public static IObservable<T> Pausable<T>(this IObservable<T> This, IObservable<bool> pauser)
         {
             return Observable.Create<T>(observer =>

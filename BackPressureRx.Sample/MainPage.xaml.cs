@@ -33,7 +33,13 @@ namespace BackPressureRx.Sample
 
             IControlledObservable<int> c = System.Reactive.Linq.Observable.Range(0, 10000).Controlled();
 
-            c.StopAndWait().Subscribe(x => Debug.WriteLine(x));
+            c.Windowed(10).Subscribe(x =>
+            {
+                c.Request(5);
+                Debug.WriteLine(x);
+            });
+
+            c.Request(5);
         }
 
         private void Button_Click(object sender, RoutedEventArgs e)

@@ -19,9 +19,10 @@ namespace BackPressureRx.Subjects
         private bool hasCompleted;
         private bool hasFailed;
         private Exception error;
-        private bool enableQueue;
+        private readonly bool enableQueue;
 
-        private int requested;
+        private Requested requested;
+        private IDisposable requestedDisposable;
 
         public ControlledSubject(bool enableQueue = true)
         {
@@ -29,7 +30,8 @@ namespace BackPressureRx.Subjects
             this.subject = new Subject<T>();
             this.gate = new object();
             this.queue = enableQueue ? new Queue<T>() : null;
-            this.requested = 0;
+            this.requested = Requested.Empty;
+            this.requestedDisposable = Disposable.Empty;
             this.hasFailed = false;
             this.hasCompleted = false;
             this.controllerDisp = Disposable.Empty;
@@ -66,13 +68,13 @@ namespace BackPressureRx.Subjects
 
         public void OnNext(T value)
         {
-            bool isRequesting = false;
+            bool hasRequested = true;
 
-            lock(gate)
-            {                
-                isRequesting = requested > 0;
-                //only queue if enabled and not requesting
-                if(!isRequesting)
+            lock (gate)
+            {
+                Requested req = this.requested;
+
+                if (req == Requested.Empty)
                 {
                     if (enableQueue)
                     {
@@ -81,74 +83,105 @@ namespace BackPressureRx.Subjects
                 }
                 else
                 {
-                    this.requested--;
+                    if (req != Requested.Unbounded)
+                    {
+                        if (Interlocked.Decrement(ref req.count) == 0)
+                        {
+                            this.DisposeCurrentRequest();
+                        }
+                    }
+                    hasRequested = true;
                 }
             }
 
-            if(isRequesting)
+            if (hasRequested)
             {
                 this.subject.OnNext(value);
             }
         }
 
-        private void OnRequest(int numberOfItems)
+        private bool ProcessRequest(ref int numberOfItems)
         {
-            lock(gate)
+            if (enableQueue)
             {
-                if (enableQueue)
+                // as long as we have queued items, send them
+                while (queue.Count >= numberOfItems && numberOfItems > 0)
                 {
-                    // as long as we have queued items, send them
-                    while (queue.Count >= numberOfItems && numberOfItems > 0)
-                    {
-                        this.subject.OnNext(queue.Dequeue());
-                        numberOfItems--;
-                    }
-                    //if the queue is not empty, wait for new request and return
-                    if(queue.Count != 0)
-                    {
-                        return;
-                    }
+                    this.subject.OnNext(queue.Dequeue());
+                    numberOfItems--;
                 }
-
-                //queue is empty
-                //error and completion are not considered items and can be send immediately
-                if (hasFailed)
+                //if the queue is not empty, wait for new request and return
+                if (queue.Count != 0)
                 {
-                    this.subject.OnError(this.error);
-                    this.controllerDisp.Dispose();
-                    this.controllerDisp = Disposable.Empty;
+                    //we could send the requested number of item immediately
+                    return true;
                 }
-                else if (this.hasCompleted)
+                else
                 {
-                    this.subject.OnCompleted();
-                    this.controllerDisp.Dispose();
-                    this.controllerDisp = Disposable.Empty;
+                    return false;
                 }
-                this.requested += numberOfItems;
             }
+
+            //queue is empty
+            //error and completion are not considered items and can be send immediately
+            if (hasFailed)
+            {
+                this.subject.OnError(this.error);
+                this.controllerDisp.Dispose();
+                this.controllerDisp = Disposable.Empty;
+            }
+            else if (this.hasCompleted)
+            {
+                this.subject.OnCompleted();
+                this.controllerDisp.Dispose();
+                this.controllerDisp = Disposable.Empty;
+            }
+            return false;
         }
 
-        public IDisposable ControlledBy(IObservable<int> controller)
+        public IDisposable Request(int number)
         {
-            lock(gate)
+            lock (gate)
             {
-                if(controllerDisp != Disposable.Empty)
-                {
-                    throw new InvalidOperationException("Observable can only be controlled by a single controller.");
-                }
-                if(this.hasCompleted && this.queue.Count == 0)
-                {
-                    throw new InvalidOperationException("Observable has already completed");
-                }
-                this.controllerDisp = controller.Subscribe(OnRequest, OnError, OnCompleted);
+                this.DisposeCurrentRequest();
 
-                return this.controllerDisp;
+                if (!ProcessRequest(ref number))
+                {
+                    this.requested = new Requested() { count = number };
+                    this.requestedDisposable = Disposable.Create(() =>
+                    {
+                        lock (gate)
+                        {
+                            this.requested = Requested.Empty;
+                        }
+                    });
+                    return this.requestedDisposable;
+                }
+                else
+                {
+                    return Disposable.Empty;
+                }
             }
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
             return this.subject.Subscribe(observer);
+        }
+
+        private void DisposeCurrentRequest()
+        {
+            this.requestedDisposable.Dispose();
+            this.requestedDisposable = Disposable.Empty;
+        }
+
+        class Requested
+        {
+            public int count;
+
+            public static Requested Empty = new Requested();
+
+            public static Requested Unbounded = new Requested() { count = -1 };
         }
     }
 }

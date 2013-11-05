@@ -12,11 +12,6 @@ namespace BackPressureRx
     /// <typeparam name="T"></typeparam>
     public interface IControlledObservable<out T> : IObservable<T>
     {
-        /// <summary>
-        /// Controls when the observable produces a new value. New values are only produced as long as the controller requests them.
-        /// </summary>
-        /// <param name="controller">The controller that requests new values.</param>
-        /// <returns>An IDisposable to stop the observable from listening to the controller.</returns>
-        IDisposable ControlledBy(IObservable<int> controller);
+        IDisposable Request(int numberOfItems = -1);
     }
 }

@@ -13,9 +13,7 @@ namespace BackPressureRx.Linq.Query
     class Windowed<T> : IObservable<T>
     {
         private readonly IControlledObservable<T> source;
-        private readonly ISubject<int> controller;
-        private IDisposable controllerSubscription;
-        private int count;
+        private IDisposable subscription;
         private readonly object gate;
 
         private int window;
@@ -24,52 +22,32 @@ namespace BackPressureRx.Linq.Query
         {
             this.source = observable;
             this.window = window;
-            this.controller = new Subject<int>();
-            this.count = 0;
             this.gate = new object();
         }
 
         public IDisposable Subscribe(IObserver<T> observer)
         {
-            SerialDisposable subscription = new SerialDisposable();
-            subscription.Disposable = this.source.Subscribe(new WindowedObserver<T>(observer, this, subscription));
-
-            lock (gate)
-            {
-                if (count++ == 0)
-                {
-                    controllerSubscription = this.source.ControlledBy(this.controller);
-                }
-            }
+            this.subscription = this.source.Subscribe(new WindowedObserver<T>(observer, this, subscription));
 
             //start requesting the first value
-            DefaultScheduler.Instance.Schedule(() => this.controller.OnNext(this.window));
+            DefaultScheduler.Instance.Schedule(() => this.source.Request(this.window));
 
-            return Disposable.Create(() =>
-            {
-                subscription.Dispose();
-
-                lock (gate)
-                {
-                    if (--count == 0)
-                    {
-                        controllerSubscription.Dispose();
-                    }
-                }
-            });
+            return this.subscription;
         }
 
         class WindowedObserver<T> : IObserver<T>, IDisposable
         {
-            private readonly Windowed<T> observable; 
+            private readonly Windowed<T> observable;
             private IObserver<T> observer;
             private IDisposable cancel;
+            private int received;
 
             public WindowedObserver(IObserver<T> observer, Windowed<T> observable, IDisposable cancel)
             {
                 this.observer = observer;
                 this.observable = observable;
                 this.cancel = cancel;
+                this.received = 0;
             }
 
             public void OnCompleted()
@@ -87,8 +65,12 @@ namespace BackPressureRx.Linq.Query
             public void OnNext(T value)
             {
                 this.observer.OnNext(value);
-                //request new value after processing of the current one completed
-                DefaultScheduler.Instance.Schedule(() => this.observable.controller.OnNext(1));
+
+                this.received = ++this.received % this.observable.window;
+                if (this.received == 0)
+                {
+                    DefaultScheduler.Instance.Schedule(() => this.observable.source.Request(this.observable.window));
+                }
             }
 
             public void Dispose()
